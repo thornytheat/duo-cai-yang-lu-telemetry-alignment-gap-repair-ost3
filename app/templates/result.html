@@ -1,0 +1,303 @@
+{% extends "base.html" %}
+{% block title %}对齐结果 {{ run.run_id }} · {{ app_name }}{% endblock %}
+{% block crumb %}对齐结果{% endblock %}
+{% block meta %}
+<span class="dot {% if run.drift.available and run.drift.drifted %}warn{% elif run.coverage.grade == 'A' %}ok{% else %}warn{% endif %}"></span>
+{{ run.device_id }} · {{ run.metric_label }} · 分级 {{ run.coverage.grade }}{% if run.drift.available %} · 偏移 {{ run.drift.offset_s | fmt(2) }} s{% endif %}
+{% endblock %}
+{% block actions %}
+<a class="btn secondary small" href="/workbench">回工作台</a>
+<a class="btn secondary small" href="/review">质量报告</a>
+<a class="btn small" href="/api/report.csv">导出 CSV</a>
+{% endblock %}
+{% block status_left %}run_id {{ run.run_id }} · 生成于 {{ run.created_at }} · 数据集 {{ run.dataset_id }} · 流水线 {{ run.total_ms | fmt(2) }} ms{% endblock %}
+{% block status_right %}网格 1 分钟 × {{ run.window.cells }} 格 · 采样率 {{ run.interval_s }}s · 阈值 {{ run.threshold_s | fmt(1) }}s{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1 class="page-title">对齐结果 · <span class="mono">{{ run.run_id }}</span></h1>
+    <p class="page-sub">
+      {{ run.device_id }} · {{ run.metric_label }}<span class="tag">{{ run.metric_unit }}</span> ·
+      网格 <strong>1 分钟 × {{ run.window.cells }} 格</strong>（{{ run.window.start }} → {{ run.window.end }}）·
+      采样率 {{ run.interval_s }}s ·
+      时钟基准：{% if run.reference.self_reference %}<strong>本设备（{{ run.reference.device_id }}，{{ run.reference.interval_s }}s）</strong>{% else %}<strong>{{ run.reference.device_id }}</strong>（{{ run.reference.interval_s }}s）{% endif %} ·
+      阈值 {{ run.threshold_s | fmt(1) }}s ·
+      结论：{% if run.drift.available %}{{ '时钟漂移，需校时' if run.drift.drifted else '时钟正常' }}{% else %}基准设备，免校时{% endif %}，
+      覆盖率 <span class="tag {% if run.coverage.grade == 'A' %}ok{% elif run.coverage.grade == 'B' %}warn{% else %}err{% endif %}">{{ run.coverage.grade }}</span>
+    </p>
+  </div>
+  <div class="page-head-actions">
+    <a class="btn secondary small" href="/workbench">换设备再对齐</a>
+    <a class="btn small" href="/api/report.csv">导出质量 CSV</a>
+  </div>
+</div>
+
+<div class="kpi-strip">
+  <div class="kpi {% if run.drift.available and run.drift.drifted %}warn{% elif run.drift.available %}ok{% endif %}">
+    <div class="k-label">时钟偏移</div>
+    <div class="k-value" style="font-size:19px">
+      {% if run.drift.offset_s is not none %}{{ run.drift.offset_s | fmt(2) }} s{% else %}—{% endif %}
+    </div>
+    <div class="k-note">
+      {% if run.drift.available %}{{ '判定漂移' if run.drift.drifted else '时钟正常' }} · 走时 {{ run.drift.rate_ppm | fmt(1) }} ppm
+      {% else %}基准设备，免校时{% endif %}
+    </div>
+  </div>
+  <div class="kpi {% if run.coverage.grade == 'A' %}ok{% elif run.coverage.grade == 'B' %}warn{% else %}err{% endif %}">
+    <div class="k-label">覆盖率</div>
+    <div class="k-value">{{ run.coverage.coverage | pct(2) }}</div>
+    <div class="k-note">{{ run.coverage.valid_cells }} / {{ run.coverage.expected_cells }} 有效格</div>
+  </div>
+  <div class="kpi {% if run.coverage.grade == 'A' %}ok{% elif run.coverage.grade == 'B' %}warn{% else %}err{% endif %}">
+    <div class="k-label">分级</div>
+    <div class="k-value">{{ run.coverage.grade }}</div>
+    <div class="k-note">≥98% A / ≥95% B / else C</div>
+  </div>
+  <div class="kpi {% if run.gaps.count %}warn{% else %}ok{% endif %}">
+    <div class="k-label">缺口</div>
+    <div class="k-value">{{ run.gaps.count }}</div>
+    <div class="k-note">插补 {{ run.gaps.interpolated_cells }} 格 · 未修复 {{ run.gaps.unrepaired_cells }} 格</div>
+  </div>
+  <div class="kpi {% if run.grid.held_cells %}warn{% endif %}">
+    <div class="k-label">carried</div>
+    <div class="k-value">{{ run.grid.held_cells }}</div>
+    <div class="k-note">hold 沿用格 · 聚合 {{ run.grid.agg_cells }} / 采样 {{ run.grid.sample_cells }}</div>
+  </div>
+  <div class="kpi">
+    <div class="k-label">流水线耗时</div>
+    <div class="k-value" style="font-size:17px">{{ run.total_ms | fmt(2) }} ms</div>
+    <div class="k-note">6 步真实测量</div>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="panel-head">
+    <div class="segmented">
+      <button type="button" data-tab-target="tab-grid" class="active">网格预览</button>
+      <button type="button" data-tab-target="tab-drift">漂移依据</button>
+      <button type="button" data-tab-target="tab-gap">缺口明细</button>
+      <button type="button" data-tab-target="tab-hour">小时摘要</button>
+      <button type="button" data-tab-target="tab-cover">覆盖率与耗时</button>
+    </div>
+    <div class="panel-actions">
+      <span class="tag">{{ run.preview | length }} 行预览 · 共 {{ run.window.cells }} 格</span>
+      <span class="tag">run <code>{{ run.run_id }}</code></span>
+    </div>
+  </div>
+
+  <div class="panel-body flush">
+    <div id="tab-grid" class="tab-panel">
+      <div class="panel-head" style="border-top:0">
+        <h3>二、1 分钟网格预览（前 60 分钟）</h3>
+        <div class="panel-actions">
+          <span class="tag">聚合 {{ run.grid.agg_cells }} · 采样 {{ run.grid.sample_cells }}</span>
+          <span class="tag warn">沿用 {{ run.grid.held_cells }}</span>
+          <span class="tag">空缺 {{ run.grid.empty_cells }}（含未修复）</span>
+        </div>
+      </div>
+      <div class="table-wrap roomy">
+        <table class="dense">
+          <thead>
+            <tr><th style="width:170px">分钟桶</th><th style="width:110px">值（{{ run.metric_unit }}）</th>
+              <th style="width:110px">来源</th><th style="width:80px">原始点数</th>
+              <th style="width:76px">carried</th><th>min / max</th></tr>
+          </thead>
+          <tbody>
+            {% for cell in run.preview %}
+            <tr>
+              <td class="small muted nowrap">{{ cell.bucket_start }}</td>
+              <td class="num">{% if cell.value is not none %}{{ cell.value | fmt(3) }}{% else %}<span class="muted">—</span>{% endif %}</td>
+              <td>
+                {% if cell.source == 'agg' %}<span class="tag">聚合 agg</span>
+                {% elif cell.source == 'sample' %}<span class="tag">原始采样</span>
+                {% elif cell.source == 'hold' %}<span class="tag warn">沿用 hold</span>
+                {% elif cell.source == 'interpolated' %}<span class="tag warn">插补</span>
+                {% else %}<span class="tag err">空缺</span>{% endif %}
+              </td>
+              <td class="num">{{ cell.samples }}</td>
+              <td>{% if cell.carried %}<span class="tag warn">是</span>{% else %}<span class="muted">否</span>{% endif %}</td>
+              <td class="small muted nowrap">
+                {% if cell.min is not none %}{{ cell.min | fmt(3) }} / {{ cell.max | fmt(3) }}{% else %}—{% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div class="panel-body tight">
+        <p class="small muted" style="margin:0">
+          聚合 {{ run.grid.agg_cells }} 格 · 原始采样 {{ run.grid.sample_cells }} 格 · 沿用 carried {{ run.grid.held_cells }} 格 ·
+          空缺 {{ run.grid.empty_cells }} 格（含未修复）。表格在容器内滚动，页面只滚主区。
+        </p>
+      </div>
+    </div>
+
+    <div id="tab-drift" class="tab-panel" hidden>
+      <div class="panel-head" style="border-top:0">
+        <h3>一、时钟漂移估计（依据）</h3>
+        <div class="panel-actions">
+          <span class="tag {% if run.drift.available and run.drift.drifted %}err{% elif run.drift.available %}ok{% endif %}">
+            {% if run.drift.available %}{{ '需校时' if run.drift.drifted else '无需校时' }}{% else %}基准设备{% endif %}
+          </span>
+          <span class="tag">阈值 {{ run.threshold_s | fmt(1) }} s</span>
+        </div>
+      </div>
+      {% if run.drift.available %}
+      <div class="panel-body tight">
+        <p style="margin:0"><strong>结论：</strong>{{ run.drift.verdict }}。
+          {% if run.drift.drifted %}<span class="tag err">需校时</span>{% else %}<span class="tag ok">无需校时</span>{% endif %}
+        </p>
+        <p style="margin:4px 0 0"><strong>校正建议：</strong>{{ run.drift.suggestion }}</p>
+      </div>
+      <div class="table-wrap auto">
+        <table class="dense">
+          <tbody>
+            <tr><th style="width:210px">拟合模型</th><td><code>{{ run.drift.correction.formula }}</code>（t_ref、t_dev 均为相对网格起点的秒）</td></tr>
+            <tr><th>斜率 a</th><td>{{ '%.8f' | format(run.drift.a) }}（1 表示走时与参考一致）</td></tr>
+            <tr><th>截距 b</th><td>{{ run.drift.b | fmt(3) }} s</td></tr>
+            <tr><th>偏移 offset = −b/a</th><td>{{ run.drift.offset_s | fmt(3) }} s（正值 = 设备表快）</td></tr>
+            <tr><th>走时偏差 (1/a−1)</th><td>{{ run.drift.rate_ppm | fmt(2) }} ppm（6 小时累计 {{ (run.drift.rate_ppm * 21600 / 1000000) | fmt(2) }} s）</td></tr>
+            <tr><th>校正后残差 RMSE</th><td>{{ run.drift.rmse_s | fmt(3) }} s（最大绝对残差 {{ run.drift.max_abs_residual_s | fmt(3) }} s）</td></tr>
+            <tr><th>配准锚点</th><td>阈值穿越（level = {{ run.drift.level | fmt(3) }}）：参考 {{ run.drift.ref_anchors }} / 设备 {{ run.drift.dev_anchors }} 个，
+              粗对齐滞后 {{ run.drift.coarse_lag_s | fmt(2) }} s，精配对 {{ run.drift.anchors }} 对参与拟合，MAD 剔除 {{ run.drift.dropped_anchors }} 个离群锚点。</td></tr>
+            <tr><th>阈值判定</th><td>|{{ run.drift.offset_s | fmt(2) }}| {% if run.drift.drifted %}&gt;{% else %}≤{% endif %} {{ run.drift.threshold_s | fmt(1) }} s</td></tr>
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <div class="panel-body tight">
+        <div class="alert alert-info" style="margin-bottom:8px">{{ run.drift.reason }}</div>
+        <p class="small muted" style="margin:0">{{ run.drift.suggestion }}</p>
+      </div>
+      {% endif %}
+    </div>
+
+    <div id="tab-gap" class="tab-panel" hidden>
+      <div class="panel-head" style="border-top:0">
+        <h3>三、缺口明细（{{ run.gaps.count }} 处）</h3>
+        <div class="panel-actions">
+          <span class="tag">插补 {{ run.gaps.interpolated_cells }} 格</span>
+          <span class="tag err">未修复 {{ run.gaps.unrepaired_cells }} 格</span>
+          <span class="tag">边界 {{ run.gaps.boundary_cells }} 格</span>
+        </div>
+      </div>
+      {% if run.gaps.count %}
+      <div class="table-wrap auto">
+        <table class="dense">
+          <thead><tr><th style="width:40px">#</th><th style="width:170px">起始桶</th><th style="width:170px">结束桶</th>
+            <th style="width:60px">格数</th><th style="width:96px">处理</th><th style="width:170px">前一个有效桶</th>
+            <th style="width:170px">后一个有效桶</th><th>原因</th></tr></thead>
+          <tbody>
+            {% for gap in run.gaps['items'] %}
+            <tr>
+              <td>{{ loop.index }}</td>
+              <td class="small muted nowrap">{{ gap.start_time }}</td>
+              <td class="small muted nowrap">{{ gap.end_time }}</td>
+              <td class="num">{{ gap.cells }}</td>
+              <td>
+                {% if gap.kind == 'interpolated' %}<span class="tag ok">线性插补</span>
+                {% else %}<span class="tag err">未修复 unrepaired</span>{% endif %}
+              </td>
+              <td class="small muted nowrap">{{ gap.prev_time or '—' }}</td>
+              <td class="small muted nowrap">{{ gap.next_time or '—' }}</td>
+              <td class="small">{{ gap.reason }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div class="panel-body tight">
+        <p class="small muted" style="margin:0">
+          汇总：插补 {{ run.gaps.interpolated_cells }} 格，未修复 {{ run.gaps.unrepaired_cells }} 格
+          （其中首尾边界 {{ run.gaps.boundary_cells }} 格，按「首尾不外推」不填值）。
+        </p>
+      </div>
+      {% else %}
+      <div class="empty"><strong>该序列在网格内没有缺口</strong>每个 1 分钟桶都有原始采样或可沿用的邻格。</div>
+      {% endif %}
+    </div>
+
+    <div id="tab-hour" class="tab-panel" hidden>
+      <div class="panel-head" style="border-top:0">
+        <h3>四、小时摘要（min / max / mean / p95 + 缺口 + carried）</h3>
+        <div class="panel-actions"><span class="tag">{{ run.hourly | length }} 个小时桶</span></div>
+      </div>
+      <div class="table-wrap auto">
+        <table class="dense">
+          <thead><tr><th style="width:180px">小时起点</th><th style="width:64px">格数</th><th>min</th><th>max</th>
+            <th>mean</th><th>p95</th><th style="width:74px">缺口格</th><th style="width:74px">carried</th></tr></thead>
+          <tbody>
+            {% for hour in run.hourly %}
+            <tr>
+              <td class="small muted nowrap">{{ hour.hour_start }}</td>
+              <td class="num">{{ hour.cells }}</td>
+              <td class="num">{{ hour.min | fmt(3) }}</td>
+              <td class="num">{{ hour.max | fmt(3) }}</td>
+              <td class="num">{{ hour.mean | fmt(3) }}</td>
+              <td class="num">{{ hour.p95 | fmt(3) }}</td>
+              <td>{% if hour.gap_cells %}<span class="tag err">{{ hour.gap_cells }}</span>{% else %}0{% endif %}</td>
+              <td>{% if hour.carried_cells %}<span class="tag warn">{{ hour.carried_cells }}</span>{% else %}0{% endif %}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div id="tab-cover" class="tab-panel" hidden>
+      <div class="split result" style="padding:12px">
+        <div>
+        <section class="panel">
+          <div class="panel-head">
+            <h3>五、覆盖率与分级</h3>
+            <div class="panel-actions">
+              <span class="tag {% if run.coverage.grade == 'A' %}ok{% elif run.coverage.grade == 'B' %}warn{% else %}err{% endif %}">等级 {{ run.coverage.grade }}</span>
+            </div>
+          </div>
+          <div class="table-wrap auto">
+            <table class="dense">
+              <tbody>
+                <tr><th style="width:200px">应到格</th><td>{{ run.coverage.expected_cells }}</td></tr>
+                <tr><th>有效格（原始+沿用+插补）</th><td>{{ run.coverage.valid_cells }}</td></tr>
+                <tr><th>原始格（聚合+采样）</th><td>{{ run.coverage.raw_cells }}（raw 覆盖率 {{ run.coverage.raw_coverage | pct(2) }}）</td></tr>
+                <tr><th>沿用 carried</th><td>{{ run.coverage.carried_cells }}</td></tr>
+                <tr><th>插补</th><td>{{ run.coverage.interpolated_cells }}</td></tr>
+                <tr><th>缺失（未修复）</th><td>{{ run.coverage.missing_cells }}</td></tr>
+                <tr><th>coverage = 有效/应到</th><td><strong>{{ run.coverage.coverage | pct(2) }}</strong></td></tr>
+                <tr><th>分级（≥98% A / ≥95% B / else C）</th>
+                  <td><span class="tag {% if run.coverage.grade == 'A' %}ok{% elif run.coverage.grade == 'B' %}warn{% else %}err{% endif %}">{{ run.coverage.grade }}</span></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+        </div>
+        <div>
+        <section class="panel">
+          <div class="panel-head">
+            <h3>六、流水线耗时（真实测量）</h3>
+            <div class="panel-actions"><span class="tag">合计 {{ run.total_ms | fmt(2) }} ms</span></div>
+          </div>
+          <div class="table-wrap auto">
+            <table class="dense">
+              <thead><tr><th style="width:100px">阶段</th><th>说明</th><th style="width:88px">耗时</th></tr></thead>
+              <tbody>
+                {% for stage in run.stages %}
+                <tr><td>{{ stage.name }}</td><td class="small muted">{{ stage.detail }}</td><td class="num">{{ stage.ms | fmt(2) }} ms</td></tr>
+                {% endfor %}
+                <tr><td colspan="2"><strong>合计</strong></td><td class="num"><strong>{{ run.total_ms | fmt(2) }} ms</strong></td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="panel-body tight">
+            <p class="small muted" style="margin:0">
+              下一步：<a href="/workbench">换设备/指标再对齐</a> · <a href="/review">看跨设备质量报告</a>
+            </p>
+          </div>
+        </section>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

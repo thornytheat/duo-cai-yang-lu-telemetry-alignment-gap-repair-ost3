@@ -1,0 +1,19 @@
+name: tsgrid
+services:
+  app:
+    build: .
+    container_name: tsgrid-app
+    ports: ["${APP_PORT:-18218}:8000"]
+    environment:
+      - APP_PORT=${APP_PORT:-18218}
+      - TSGRID_DATA_DIR=/app/data
+      - TSGRID_SAMPLE_DIR=/app/sample_data/telemetry
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - tsgrid-data:/app/data
+volumes:
+  tsgrid-data:

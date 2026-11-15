@@ -1,0 +1,209 @@
+{% extends "base.html" %}
+{% block title %}质量复核 · {{ app_name }}{% endblock %}
+{% block crumb %}质量复核{% endblock %}
+{% block meta %}<span class="dot {% if report.summary.drifted_pairs %}warn{% else %}ok{% endif %}"></span>数据集 {{ dataset.dataset_id }} · {{ report.summary.pairs }} 个序列 · 阈值 {{ report.threshold_s | fmt(1) }}s{% endblock %}
+{% block actions %}
+<a class="btn secondary small" href="/api/report">JSON</a>
+<a class="btn small" href="/api/report.csv">导出 CSV</a>
+{% endblock %}
+{% block status_left %}全部 {{ report.summary.pairs }} 个「设备 × 指标」逐条走完对齐流水线后汇总 · 同一数据集按阈值缓存重算{% endblock %}
+{% block status_right %}平均覆盖率 {{ report.summary.avg_coverage | pct(2) }} · 缺口 {{ report.summary.total_gaps }} 处 · 漂移 {{ report.summary.drifted_pairs }} 个序列{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1 class="page-title">质量报告与跨设备对比</h1>
+    <p class="page-sub">数据集 {{ dataset.dataset_id }} · 漂移阈值 {{ report.threshold_s | fmt(1) }}s ·
+      共 {{ report.summary.pairs }} 个「设备 × 指标」序列，逐条走完对齐流水线后汇总；筛选与搜索即时生效（纯前端，不新增接口）。</p>
+  </div>
+  <div class="page-head-actions">
+    <a class="btn small" href="/api/report.csv">导出 CSV</a>
+    <a class="btn secondary small" href="/workbench">执行新对齐</a>
+  </div>
+</div>
+
+<div class="toolbar" style="border:1px solid var(--line);border-radius:10px;background:#fff;margin-bottom:12px">
+  <select id="review-device" aria-label="按设备筛选">
+    <option value="">全部设备</option>
+    {% for dev in report.devices %}
+    <option value="{{ dev.device_id }}">{{ dev.device_id }}</option>
+    {% endfor %}
+  </select>
+  <select id="review-metric" aria-label="按指标筛选">
+    <option value="">全部指标</option>
+    {% for m in report_metrics %}
+    <option value="{{ m.metric }}">{{ m.label }}</option>
+    {% endfor %}
+  </select>
+  <input type="search" id="review-search" placeholder="搜索设备 / 指标 / 分级" aria-label="搜索质量明细">
+  <span class="small muted" id="review-stat">共 {{ report.rows | length }} 条序列</span>
+  <span class="spacer"></span>
+  <a class="btn secondary small" href="/api/report">报告 JSON</a>
+  <a class="btn small" href="/api/report.csv">导出 CSV</a>
+</div>
+
+<div class="split result" style="grid-template-columns:minmax(0,1fr) minmax(288px,320px)">
+  <div>
+    <section class="panel" id="m6">
+      <div class="panel-head">
+        <h2>一、设备级汇总（取该设备最差指标）</h2>
+        <div class="panel-actions">
+          <span class="tag">模块 6/6 · 质量报告</span>
+          <span class="tag">A {{ report.summary.grade_counts.get('A', 0) }} / B {{ report.summary.grade_counts.get('B', 0) }} / C {{ report.summary.grade_counts.get('C', 0) }}</span>
+        </div>
+      </div>
+      <div class="table-wrap auto">
+        <table class="dense">
+          <thead>
+            <tr><th style="width:104px">设备</th><th style="width:54px">采样率</th><th style="width:92px">指标</th>
+              <th style="width:70px">最差指标</th><th style="width:76px">覆盖率</th><th style="width:48px">分级</th>
+              <th style="width:46px">缺口</th><th style="width:62px">carried</th>
+              <th style="width:60px">未修复</th><th style="width:118px">时钟偏移</th></tr>
+          </thead>
+          <tbody>
+            {% for dev in report.devices %}
+            <tr data-device="{{ dev.device_id }}">
+              <td class="nowrap"><strong>{{ dev.device_id }}</strong></td>
+              <td><span class="tag">{{ dev.interval_s }}s</span></td>
+              <td class="small nowrap">{% for m in dev.metrics %}{{ metric_labels.get(m, m) }} {% endfor %}</td>
+              <td class="small nowrap">{{ metric_labels.get(dev.worst_metric, dev.worst_metric) }}</td>
+              <td class="num">{{ dev.coverage | pct(2) }}</td>
+              <td><span class="tag {% if dev.grade == 'A' %}ok{% elif dev.grade == 'B' %}warn{% else %}err{% endif %}">{{ dev.grade }}</span></td>
+              <td class="num">{{ dev.gap_count }}</td>
+              <td class="num">{{ dev.carried_cells }}</td>
+              <td class="num">{{ dev.unrepaired_cells }}</td>
+              <td class="nowrap">
+                {% if dev.offset_s is not none %}
+                  <span class="num">{{ dev.offset_s | fmt(2) }} s</span>
+                  {% if dev.drifted %}<span class="tag err">漂移</span>{% else %}<span class="tag ok">正常</span>{% endif %}
+                {% else %}<span class="muted small">基准设备</span>{% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div class="panel-body tight">
+        <p class="small muted" style="margin:0">
+          设备级汇总取该设备最差指标的覆盖率与分级；「最差指标」即决定该设备结论的那条序列。
+        </p>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>二、逐序列明细（{{ report.rows | length }} 条）</h2>
+        <div class="panel-actions">
+          <span class="tag">表内滚动</span>
+        </div>
+      </div>
+      {% if report.rows %}
+      <div class="table-wrap roomy">
+        <table class="dense" id="pair-table">
+          <thead>
+            <tr><th style="width:100px">设备</th><th style="width:56px">指标</th><th style="width:52px">采样率</th>
+              <th style="width:54px">应到格</th><th style="width:54px">原始格</th><th style="width:54px">沿用</th>
+              <th style="width:50px">插补</th><th style="width:58px">未修复</th><th style="width:72px">coverage</th>
+              <th style="width:46px">分级</th><th style="width:46px">缺口</th><th style="width:150px">漂移 offset / ppm / 残差</th></tr>
+          </thead>
+          <tbody>
+            {% for row in report.rows %}
+            <tr data-device="{{ row.device_id }}" data-metric="{{ row.metric }}"
+                data-search="{{ row.device_id }} {{ row.metric }} {{ row.metric_label }} {{ row.coverage.grade }}">
+              <td class="nowrap">{{ row.device_id }}</td>
+              <td class="small nowrap">{{ row.metric_label }}</td>
+              <td class="num">{{ row.interval_s }}s</td>
+              <td class="num">{{ row.coverage.expected_cells }}</td>
+              <td class="num">{{ row.coverage.raw_cells }}</td>
+              <td class="num">{% if row.coverage.carried_cells %}<span class="tag warn">{{ row.coverage.carried_cells }}</span>{% else %}0{% endif %}</td>
+              <td class="num">{{ row.coverage.interpolated_cells }}</td>
+              <td class="num">{% if row.coverage.unrepaired_cells %}<span class="tag err">{{ row.coverage.unrepaired_cells }}</span>{% else %}0{% endif %}</td>
+              <td class="num">{{ row.coverage.coverage | pct(2) }}</td>
+              <td><span class="tag {% if row.coverage.grade == 'A' %}ok{% elif row.coverage.grade == 'B' %}warn{% else %}err{% endif %}">{{ row.coverage.grade }}</span></td>
+              <td class="num">{{ row.gaps.count }}</td>
+              <td class="small nowrap">
+                {% if row.drift.offset_s is not none %}
+                  <span class="num">{{ row.drift.offset_s | fmt(2) }} s</span> ·
+                  <span class="muted">{{ row.drift.rate_ppm | fmt(1) }} ppm</span> ·
+                  <span class="muted">{{ row.drift.rmse_s | fmt(3) }} s</span>
+                {% else %}<span class="muted">基准设备（不与自己比对）</span>{% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div class="panel-body tight">
+        <p class="small muted" style="margin:0">
+          coverage =（聚合 + 原始采样 + 沿用 + 插补）/ 应到格；未修复格不计入有效格。分级：≥98% A / ≥95% B / else C。
+          基准设备（该指标最高频序列）不与自己比对，偏移、走时与残差记为 —。
+        </p>
+      </div>
+      {% else %}
+      <div class="empty"><strong>当前数据集没有可汇总的序列</strong>先到总览页校验并载入样例遥测。</div>
+      {% endif %}
+    </section>
+  </div>
+
+  <div>
+    <section class="panel pane-sticky">
+      <div class="panel-head">
+        <h2>质量报告</h2>
+        <div class="panel-actions">
+          <span class="tag">阈 {{ report.threshold_s | fmt(1) }}s</span>
+          <a class="btn secondary small" href="/api/report.csv">CSV</a>
+        </div>
+      </div>
+      <div class="panel-body">
+        <div class="kpi-strip" style="grid-template-columns:repeat(2,minmax(0,1fr));margin-bottom:10px">
+          <div class="kpi {% if report.summary.avg_coverage >= 0.98 %}ok{% elif report.summary.avg_coverage >= 0.95 %}warn{% else %}err{% endif %}">
+            <div class="k-label">平均覆盖率</div>
+            <div class="k-value">{{ report.summary.avg_coverage | pct(2) }}</div>
+            <div class="k-note">A {{ report.summary.grade_counts.get('A', 0) }} / B {{ report.summary.grade_counts.get('B', 0) }} / C {{ report.summary.grade_counts.get('C', 0) }}</div>
+          </div>
+          <div class="kpi {% if report.summary.total_gaps %}warn{% else %}ok{% endif %}">
+            <div class="k-label">缺口总数</div>
+            <div class="k-value">{{ report.summary.total_gaps }}</div>
+            <div class="k-note">未修复格 {{ report.summary.total_unrepaired }}</div>
+          </div>
+          <div class="kpi {% if report.summary.drifted_pairs %}warn{% endif %}">
+            <div class="k-label">判定漂移</div>
+            <div class="k-value">{{ report.summary.drifted_pairs }}</div>
+            <div class="k-note">序列级 · 阈值 {{ report.threshold_s | fmt(1) }}s</div>
+          </div>
+          <div class="kpi">
+            <div class="k-label">carried 格</div>
+            <div class="k-value">{{ report.summary.total_carried }}</div>
+            <div class="k-note">hold 沿用合计</div>
+          </div>
+        </div>
+
+        <h3 style="margin:2px 0 4px">三、跨设备对比要点</h3>
+        <ul class="list small" style="margin:0">
+          <li><strong>采样率差异：</strong>1s 设备每格聚合 60 个原始点，5s 设备 12 个，60s 设备 1 个（直接沿用原值）。</li>
+          <li><strong>缺采段对齐：</strong>全线缺采的 03:00–03:02 与 04:10–04:14 在三台设备上同时出现，缺口判定一致；
+            各设备自身的断采（如 LINE-A-03 压力 01:40–02:05）只影响本设备覆盖率。</li>
+          <li><strong>降级段：</strong>LINE-A-02 温度 02:10–02:55 以 180s 上报、LINE-A-03 05:00–05:50 以 120s 上报，
+            1 分钟网格以 hold 沿用并计入 carried，不误判为缺口。</li>
+          <li><strong>时钟：</strong>共 {{ report.summary.drifted_pairs }} 个序列判定为时钟漂移；
+            LINE-A-03 的偏移量与「现场 +37 秒」的结论一致，其余设备偏移在阈值之内。</li>
+        </ul>
+
+        <details class="help" style="margin-top:10px">
+          <summary>CSV 列与导出说明</summary>
+          <div class="small" style="margin-top:6px">
+            CSV 列：device_id, metric, interval_s, expected_cells, raw_cells, carried_cells, interpolated_cells,
+            unrepaired_cells, valid_cells, coverage, grade, gap_count, offset_s, rate_ppm, rmse_s, drifted。
+            <div style="margin-top:6px">导出的是当前数据集 + 当前阈值的全量结果；按阈值重新计算会得到不同的分级。</div>
+          </div>
+        </details>
+      </div>
+      <div class="panel-actions">
+        <a class="btn small" href="/api/report.csv">导出质量报告 CSV</a>
+        <a class="btn secondary small" href="/api/report">查看 JSON</a>
+        <a class="btn secondary small" href="/workbench">回工作台</a>
+      </div>
+    </section>
+  </div>
+</div>
+{% endblock %}

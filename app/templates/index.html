@@ -1,0 +1,196 @@
+{% extends "base.html" %}
+{% block title %}总览 · {{ app_name }}{% endblock %}
+{% block crumb %}总览{% endblock %}
+{% block meta %}<span class="dot ok"></span>数据集 {{ dataset.dataset_id }} · {{ stats.device_count }} 台设备 / {{ stats.pair_count }} 个序列{% endblock %}
+{% block actions %}
+<a class="btn secondary small" href="/review">质量报告</a>
+<a class="btn small" href="/workbench">去工作台</a>
+{% endblock %}
+{% block status_left %}样例 1s / 5s / 60s · 统一网格 1 分钟 × {{ bucket_count }} 格 · 运行记录落 SQLite 命名卷 tsgrid-data{% endblock %}
+{% block status_right %}{{ app_name }} · 漂移阈值 {{ threshold }} s{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1 class="page-title">多采样率遥测对齐与缺口修复</h1>
+    <p class="page-sub">同一产线 1s / 5s / 60s 三种采样率、其中一台时钟漂移约 37 秒的遥测，统一到 1 分钟网格上，给出可追溯的对齐依据、缺口修复结论与覆盖率分级。</p>
+  </div>
+</div>
+
+<div class="kpi-strip">
+  <div class="kpi">
+    <div class="k-label">设备</div>
+    <div class="k-value">{{ stats.device_count }}</div>
+    <div class="k-note">1s / 5s / 60s 各一台</div>
+  </div>
+  <div class="kpi">
+    <div class="k-label">指标</div>
+    <div class="k-value">{{ stats.metric_count }}</div>
+    <div class="k-note">温度 temperature / 压力 pressure</div>
+  </div>
+  <div class="kpi">
+    <div class="k-label">对齐序列</div>
+    <div class="k-value">{{ stats.pair_count }}</div>
+    <div class="k-note">设备 × 指标，逐条真算</div>
+  </div>
+  <div class="kpi {% if last_run and last_run.drift.drifted %}warn{% endif %}">
+    <div class="k-label">最近对齐</div>
+    <div class="k-value" style="font-size:17px">
+      {% if last_run and last_run.drift.offset_s is not none %}{{ last_run.drift.offset_s | fmt(2) }} s{% elif last_run %}<span class="tag">基准</span>{% else %}—{% endif %}
+    </div>
+    <div class="k-note">
+      {% if last_run %}{{ last_run.device_id }} · {{ metric_labels.get(last_run.metric, last_run.metric) }} · {{ last_run.created_at[11:19] }}{% else %}还没有对齐记录{% endif %}
+    </div>
+  </div>
+  <div class="kpi {% if stats.avg_coverage >= 0.98 %}ok{% elif stats.avg_coverage >= 0.95 %}warn{% else %}err{% endif %}">
+    <div class="k-label">平均覆盖率</div>
+    <div class="k-value">{{ stats.avg_coverage | pct(2) }}</div>
+    <div class="k-note">A {{ stats.grade_counts.get('A', 0) }} / B {{ stats.grade_counts.get('B', 0) }} / C {{ stats.grade_counts.get('C', 0) }} 级</div>
+  </div>
+</div>
+
+<div class="split result">
+  <div>
+    <section class="panel">
+      <div class="panel-head">
+        <h2>最近的对齐运行</h2>
+        <div class="panel-actions">
+          <span class="tag">{{ runs|length }} 条最近记录</span>
+          <a class="btn secondary small" href="/workbench">执行新对齐</a>
+        </div>
+      </div>
+      {% if runs %}
+      <div class="table-wrap">
+        <table class="dense">
+          <thead>
+            <tr><th style="width:170px">运行</th><th style="width:104px">设备</th><th style="width:90px">指标</th>
+              <th style="width:76px">阈值</th><th>时间</th><th style="width:74px">操作</th></tr>
+          </thead>
+          <tbody>
+            {% for run in runs %}
+            <tr>
+              <td class="mono small"><a href="/result/{{ run.run_id }}">{{ run.run_id }}</a></td>
+              <td><strong>{{ run.device_id }}</strong></td>
+              <td class="small">{{ metric_labels.get(run.metric, run.metric) }}</td>
+              <td class="num">{{ run.threshold_s | fmt(1) }} s</td>
+              <td class="small muted nowrap">{{ run.created_at }}</td>
+              <td><a class="small" href="/result/{{ run.run_id }}">看结果</a></td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <div class="empty">
+        <strong>还没有对齐记录</strong>
+        先到工作台选设备 + 指标执行一次对齐，这里会出现可回看的运行记录与结论入口。
+        <div style="margin-top:10px"><a class="btn small" href="/workbench">去工作台执行对齐</a></div>
+      </div>
+      {% endif %}
+      <div class="panel-body tight">
+        <p class="small muted" style="margin:0">
+          每次执行都会落一条运行记录（含漂移拟合参数、网格、缺口、摘要与覆盖率），可随时回看结果页；同一输入重跑产生新记录，旧记录保留。
+        </p>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>设备概览（当前数据集 {{ dataset.dataset_id }}）</h2>
+        <div class="panel-actions">
+          <span class="tag">网格 {{ bucket_count }} 格</span>
+          <span class="tag">原始 {{ dataset.rows }} 行</span>
+        </div>
+      </div>
+      <div class="table-wrap auto">
+        <table class="dense">
+          <thead>
+            <tr><th style="width:130px">设备</th><th style="width:90px">采样率</th><th>指标</th>
+              <th style="width:90px">原始点数</th><th>来源文件</th></tr>
+          </thead>
+          <tbody>
+            {% for dev in inventory %}
+            <tr>
+              <td><strong>{{ dev.device_id }}</strong></td>
+              <td><span class="tag">{{ dev.rate_label }}</span></td>
+              <td class="small">
+                {% for m in dev.metrics %}
+                <span class="tag">{{ m.label }}</span>
+                {% endfor %}
+              </td>
+              <td class="num">{{ dev.rows }}</td>
+              <td class="small muted mono cell-ellipsis">{{ dev.sources | join('、') }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div class="panel-body tight">
+        <p class="small muted" style="margin:0">
+          统一网格：1 分钟桶 × {{ bucket_count }} 格；漂移阈值 {{ threshold }} 秒；
+          缺口 ≤3 格线性插补，&gt;3 格标记未修复；前后原始格间距 ≤3 格时 hold 沿用（carried）。
+        </p>
+      </div>
+    </section>
+  </div>
+
+  <div>
+    <section class="panel">
+      <div class="panel-head">
+        <h2>快捷操作</h2>
+        <div class="panel-actions"><span class="tag">4 步跑通</span></div>
+      </div>
+      <div class="panel-body">
+        <div style="display:flex;flex-wrap:wrap;gap:8px">
+          <button id="import-btn" type="button">校验并载入样例遥测</button>
+          <a class="btn secondary" href="/workbench">去工作台</a>
+          <a class="btn secondary" href="/review">看质量报告</a>
+        </div>
+        <div id="import-msg" class="small" style="margin-top:8px" hidden></div>
+        <ul class="list small" style="margin-bottom:0">
+          <li>点「校验并载入样例遥测」：按内容 sha256 幂等导入，重复点击不会生成重复数据集。</li>
+          <li>工作台选设备 + 指标执行对齐；结果页给出偏移、拟合参数、残差、缺口起止桶与覆盖率口径。</li>
+          <li>质量复核看三台设备 A/B/C 分级、跨设备对比，导出 CSV / JSON。</li>
+        </ul>
+      </div>
+    </section>
+
+    <details class="help" style="margin-top:12px">
+      <summary>演示步骤与样例说明（谁在用、卡在哪、输入输出）</summary>
+      <div class="small" style="margin-top:8px">
+        <p><strong>谁在用、卡在哪</strong></p>
+        <ul class="list small">
+          <li>使用者：设备运维分析组（产线 A 的温度/压力趋势与数据质量值班）。</li>
+          <li>三台设备采样率不同（<code>1s</code> / <code>5s</code> / <code>60s</code>），直接画在一张图上横坐标对不齐。</li>
+          <li>有一台设备时钟比线级参考快 37 秒，趋势峰值整体右移，人工看不出来。</li>
+          <li>缺采段靠人眼找：到底缺了 3 分钟还是 30 分钟，能不能补、补完还能不能信。</li>
+        </ul>
+        <p><strong>系统替代的环节：</strong>漂移定量估计 → 1 分钟网格重采样 → 缺口判定与有限插补 →
+          小时摘要 → 覆盖率分级，一条链路给出结论与依据。</p>
+
+        <p><strong>输入 / 输出</strong></p>
+        <p>输入：遥测 CSV（<code>device_id,ts,metric,value</code>），带时区 ISO-8601 时间戳；
+          样例为产线 A 三台设备 6 小时数据，共 <strong>{{ dataset.rows }}</strong> 行。</p>
+        <p>输出：</p>
+        <ul class="list small">
+          <li>时钟偏移（秒）、走时偏差（ppm）、拟合参数 <code>a/b</code>、校正后残差 RMSE；</li>
+          <li>1 分钟网格（聚合 / 沿用 carried / 插补），前 60 分钟预览；</li>
+          <li>缺口明细（起止桶、格数、插补或未修复、原因），首尾不外推；</li>
+          <li>每小时 min/max/mean/p95 + 缺口数 + carried 数；</li>
+          <li>覆盖率与 A/B/C 分级，跨设备对比与 CSV 导出。</li>
+        </ul>
+
+        <p><strong>演示步骤</strong></p>
+        <ol class="list small" style="margin-bottom:0">
+          <li>点「校验并载入样例遥测」：按内容 sha256 幂等导入，重复点击不会生成重复数据集。</li>
+          <li>进 <a href="/workbench">工作台</a>：选设备 + 指标，执行对齐；页面会显示各阶段真实耗时。</li>
+          <li>看 <a href="/workbench">结果页</a>：漂移设备 <code>LINE-A-03</code> 偏移应为 <strong>≈ +37 秒</strong>，
+            温度序列应有 <strong>2 处缺口</strong>（3 格插补、5 格未修复）。</li>
+          <li>切到 <code>LINE-A-02</code> 温度：可见 3 分钟降级段被 hold 沿用（carried 计数），覆盖率落到 B 级。</li>
+          <li>进 <a href="/review">质量报告</a>：三台设备 A/B/C 分级、跨设备对比，导出 CSV。</li>
+        </ol>
+      </div>
+    </details>
+  </div>
+</div>
+{% endblock %}
