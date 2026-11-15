@@ -108,3 +108,34 @@ def test_hold_filled_cells_are_not_reported_as_gap():
     result = gaps.find_gaps(cells)
     assert result["count"] == 0
     assert result["interpolated_cells"] == 0
+
+
+def test_out_of_service_buckets_are_not_gaps():
+    """投运前/停用后的空桶不是缺口：只在在役段内判定，边界缺口也不含区间外桶。"""
+    from app import service
+
+    window_start = B0 * 60
+    window_end = B0 * 60 + 10 * 60
+    smap = service.build_service_map(
+        [{"device_id": "D", "start_ts": window_start + 3 * 60, "end_ts": window_start + 8 * 60}],
+        ["D"],
+        window_start,
+        window_end,
+    )
+    # 在役段 [3, 8) 内：第 4、5、6 桶空（3 格缺口，前后原始桶相距 4 格 → 不走 hold）
+    points = [
+        (B0 * 60 + (3 * 60) + 5, 10.0),
+        (B0 * 60 + (7 * 60) + 5, 13.0),
+        # 停用后的迟到点：保留但不参与，也不制造缺口
+        (B0 * 60 + (9 * 60) + 5, 99.0),
+    ]
+    cells = grid.resample(points, 60, B0, B0 + 10, smap["D"])
+    result = gaps.find_gaps(cells)
+    assert result["count"] == 1
+    item = result["items"][0]
+    assert item["kind"] == "interpolated"
+    assert item["start_bucket"] == B0 + 4 and item["end_bucket"] == B0 + 6
+    # 首尾 0..2 与 8..10 均为区间外桶，不计 boundary
+    assert result["boundary_cells"] == 0
+    assert cells[9]["in_service"] is False
+    assert cells[9]["excluded_points"][0]["reason"] == "late"

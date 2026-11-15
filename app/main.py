@@ -8,7 +8,8 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import pipeline, quality, seed, settings, store
+from . import pipeline, quality, seed, service_admin, settings, store
+from .telemetry import ImportError_
 
 BASE = pathlib.Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE / "templates"))
@@ -176,6 +177,17 @@ def review(request: Request):
         if row["metric"] not in seen:
             seen.add(row["metric"])
             report_metrics.append({"metric": row["metric"], "label": row["metric_label"]})
+    service_windows = []
+    for device in dataset.devices():
+        window = dataset.service_window_for(device)
+        service_windows.append(
+            {
+                "device_id": device,
+                "intervals": window.intervals_iso() if window else [],
+                "in_service_cells": dataset.expected_buckets_for(device),
+                "grid_cells": dataset.bucket_count(),
+            }
+        )
     return templates.TemplateResponse(
         request,
         "review.html",
@@ -186,17 +198,30 @@ def review(request: Request):
             dataset=dataset,
             report=report,
             report_metrics=report_metrics,
+            service_windows=service_windows,
+            service_version_id=dataset.service_version_id,
         ),
     )
 
 
 def _report(dataset, threshold: float) -> dict:
-    key = (dataset.sha256, threshold)
+    """整批质量报告：同 (数据集, 启用版本, 阈值) 重跑不新增报告。
+
+    优先内存缓存 → DB 快照（重跑同批直接命中）→ 现算并落快照。
+    页面 / JSON / CSV 导出都从这一份 report 取数，在役范围与覆盖率口径天然一致。
+    """
+    key = (dataset.sha256, dataset.service_version_id, threshold)
     cached = STATE["report_cache"].get(key)
-    if cached is None:
-        cached = pipeline.build_report(dataset, threshold)
-        STATE["report_cache"][key] = cached
-    return cached
+    if cached is not None:
+        return cached
+    snapshotted = store.get_report_snapshot(dataset.dataset_id, dataset.service_version_id, threshold)
+    if snapshotted is not None:
+        STATE["report_cache"][key] = snapshotted
+        return snapshotted
+    report = pipeline.build_report(dataset, threshold)
+    store.save_report_snapshot(dataset.dataset_id, dataset.service_version_id, threshold, report)
+    STATE["report_cache"][key] = report
+    return report
 
 
 def _parse_threshold(raw) -> float:
@@ -215,7 +240,8 @@ def _parse_threshold(raw) -> float:
 async def api_import(request: Request):
     """重新载入样例遥测（按内容 sha256 幂等，不产生重复数据集）。"""
     try:
-        dataset = seed.ensure_seed()["dataset"]
+        seeded = seed.ensure_seed()
+        dataset = seeded["dataset"]
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=422, detail=f"导入失败：{exc}") from exc
     STATE["dataset"] = dataset
@@ -227,8 +253,102 @@ async def api_import(request: Request):
         "rows": dataset.rows,
         "files": dataset.files,
         "devices": dataset.inventory(),
+        "service_version_id": dataset.service_version_id,
         "window": {"cells": dataset.bucket_count()},
     }
+
+
+@app.get("/api/service-records")
+def api_service_records():
+    """返回当前生效的启用记录版本与每台设备合并后的在役区间。"""
+    dataset = get_dataset()
+    active = store.get_active_service_version(dataset.dataset_id)
+    windows = []
+    for device in dataset.devices():
+        window = dataset.service_window_for(device)
+        windows.append(
+            {
+                "device_id": device,
+                "intervals": window.intervals_iso() if window else [],
+                "in_service_cells": dataset.expected_buckets_for(device),
+            }
+        )
+    return {
+        "dataset_id": dataset.dataset_id,
+        "active_version_id": dataset.service_version_id,
+        "active_version": active,
+        "versions": store.list_service_versions(dataset.dataset_id),
+        "devices": windows,
+    }
+
+
+@app.post("/api/service-records")
+async def api_replace_service_records(request: Request):
+    """更正启用记录：合并重叠区间 → 整批重算 → 一致性核对 → 原子切换，失败恢复旧版。
+
+    请求体：{"records": [{"device_id": ..., "start_ts": ISO8601, "end_ts": ISO8601 或 null}],
+             "note"?: 备注}。重跑同批（合并后与 active 一致）不新增版本/报告。
+    """
+    dataset = get_dataset()
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail="请求体必须是 JSON") from None
+    if not isinstance(body, dict) or not isinstance(body.get("records"), list):
+        raise HTTPException(status_code=400, detail="请求体必须是 JSON 对象且含 records 数组")
+    raw_records = body["records"]
+    parsed: list[dict] = []
+    for idx, rec in enumerate(raw_records):
+        if not isinstance(rec, dict):
+            raise HTTPException(status_code=400, detail=f"第 {idx + 1} 条记录不是对象")
+        device = (rec.get("device_id") or "").strip()
+        if not device:
+            raise HTTPException(status_code=400, detail=f"第 {idx + 1} 条记录缺少 device_id")
+        start_raw = (rec.get("start_ts") or "").strip()
+        if not start_raw:
+            raise HTTPException(status_code=400, detail=f"第 {idx + 1} 条记录缺少 start_ts")
+        try:
+            start = _parse_iso(start_raw)
+        except ImportError_ as exc:
+            raise HTTPException(status_code=400, detail=f"第 {idx + 1} 条 start_ts 非法：{exc}") from None
+        end_raw = rec.get("end_ts")
+        end = None
+        if end_raw not in (None, ""):
+            try:
+                end = _parse_iso(str(end_raw).strip())
+            except ImportError_ as exc:
+                raise HTTPException(status_code=400, detail=f"第 {idx + 1} 条 end_ts 非法：{exc}") from None
+            if end <= start:
+                raise HTTPException(status_code=400, detail=f"第 {idx + 1} 条记录 end_ts 必须晚于 start_ts")
+        parsed.append({"device_id": device, "start_ts": start, "end_ts": end})
+
+    note = str(body.get("note") or "人工更正启用记录")[:200]
+    before_version = dataset.service_version_id
+    try:
+        result = service_admin.apply_service_records(dataset, parsed, note=note)
+    except ImportError_ as exc:
+        # 校验 / 整批核对失败：事务已回滚，线上数据集与旧版本保持不变
+        raise HTTPException(status_code=422, detail=f"启用记录更正失败，已保留旧版：{exc}") from None
+    except Exception as exc:  # noqa: BLE001
+        # 重算阶段任何异常都不得留下半成品：未进入事务即无写入，旧版保持生效
+        raise HTTPException(status_code=422, detail=f"启用记录更正失败，已保留旧版：{exc}") from None
+    STATE["report_cache"].clear()
+    report = result["report"]
+    return {
+        "ok": True,
+        "changed": result["changed"],
+        "version_id": result["version_id"],
+        "previous_version_id": before_version,
+        "reason": result["reason"],
+        "summary": report["summary"],
+        "devices": report["devices"],
+    }
+
+
+def _parse_iso(raw: str) -> float:
+    from .telemetry import parse_ts
+
+    return parse_ts(raw)
 
 
 @app.post("/api/align")
@@ -284,6 +404,7 @@ def api_report(threshold: float | None = None):
     report = _report(dataset, _parse_threshold(threshold))
     return {
         "dataset_id": report["dataset_id"],
+        "service_version_id": report.get("service_version_id"),
         "threshold_s": report["threshold_s"],
         "summary": report["summary"],
         "devices": report["devices"],
@@ -293,6 +414,7 @@ def api_report(threshold: float | None = None):
                 "metric": row["metric"],
                 "interval_s": row["interval_s"],
                 "coverage": row["coverage"],
+                "service": row.get("service"),
                 "drift": {
                     "available": row["drift"].get("available"),
                     "offset_s": row["drift"].get("offset_s"),

@@ -28,6 +28,19 @@ DEVICES = {
     "LINE-A-01": {"interval_s": 1, "metrics": ["temperature"], "offset_s": 0.0, "rate_ppm": 0.0},
     "LINE-A-02": {"interval_s": 5, "metrics": ["temperature", "pressure"], "offset_s": 0.0, "rate_ppm": 0.0},
     "LINE-A-03": {"interval_s": 60, "metrics": ["temperature", "pressure"], "offset_s": 37.0, "rate_ppm": 55.0},
+    # 中途投运 / 提前停用：02:00 投运、05:30 停用；停用后还有 4 个迟到点（不参与结果）。
+    # service_records.csv 里给它两条重叠记录，加载时合并为一个在役区间。
+    "LINE-A-04": {"interval_s": 60, "metrics": ["temperature"], "offset_s": 0.0, "rate_ppm": 0.0},
+}
+
+# 设备在役窗口（相对 DAY 的秒，[start, end)）；未列出的设备按整段 6 小时在役。
+SERVICE_SPAN = {
+    "LINE-A-04": (2 * 3600, 5 * 3600 + 30 * 60),
+}
+
+# 停用后的迟到点（相对 DAY 的秒）：曲线不得延伸到生命周期外，这些点保留但标 late 不参与。
+LATE_POINTS = {
+    "LINE-A-04": [5 * 3600 + 41 * 60, 5 * 3600 + 42 * 60, 5 * 3600 + 58 * 60, 6 * 3600 - 60],
 }
 
 # 指标形态：三角波 + 极小噪声（噪声 < 0.05% 幅值）
@@ -89,13 +102,15 @@ def build_rows() -> list[tuple[str, str, str, str]]:
     for device, spec in DEVICES.items():
         offset = spec["offset_s"]
         drift = spec["rate_ppm"] / 1_000_000.0
+        service_span = SERVICE_SPAN.get(device)
         for metric in spec["metrics"]:
             shape = METRIC_SHAPE[metric]
             salt = 1 if metric == "temperature" else 7
             t = 0
             while t < SPAN_S:
                 cadence = cadence_for(device, metric, t, spec["interval_s"])
-                if not outage_for(device, metric, t):
+                in_service = service_span is None or service_span[0] <= t < service_span[1]
+                if in_service and not outage_for(device, metric, t):
                     value = triangle(t, shape["base"], shape["amp"], shape["period_s"])
                     value += noise(t, shape["noise"], salt)
                     # 设备本地时钟 = 真实时刻 + 固定偏移 + 走时误差
@@ -103,7 +118,33 @@ def build_rows() -> list[tuple[str, str, str, str]]:
                     ts = (DAY + timedelta(seconds=local)).isoformat(timespec="milliseconds")
                     rows.append((device, ts, metric, f"{value:.{shape['decimals']}f}"))
                 t += cadence
+            # 停用后的迟到记录：保留在原始 CSV，但对齐时必须标 late、不参与结果
+            for late_t in LATE_POINTS.get(device, []):
+                value = triangle(late_t, shape["base"], shape["amp"], shape["period_s"])
+                value += noise(late_t, shape["noise"], salt)
+                local = late_t + offset + drift * late_t
+                ts = (DAY + timedelta(seconds=local)).isoformat(timespec="milliseconds")
+                rows.append((device, ts, metric, f"{value:.{shape['decimals']}f}"))
     return rows
+
+
+def build_service_records() -> list[tuple[str, str, str]]:
+    """启用记录 CSV 行（含表头）。LINE-A-04 故意给两条重叠记录演示合并。"""
+    def iso(second: float | None):
+        if second is None:
+            return ""
+        return (DAY + timedelta(seconds=second)).isoformat(timespec="seconds")
+
+    records = [("device_id", "start_ts", "end_ts")]
+    for device in DEVICES:
+        if device not in SERVICE_SPAN:
+            start, end = 0, SPAN_S
+            records.append((device, iso(start), iso(end)))
+    start, end = SERVICE_SPAN["LINE-A-04"]
+    # 重叠区间：[02:00, 04:00) 与 [03:30, 05:30) → 合并为 [02:00, 05:30)
+    records.append(("LINE-A-04", iso(start), iso(3 * 3600 + 30 * 60)))
+    records.append(("LINE-A-04", iso(3 * 3600 + 30 * 60), iso(end)))
+    return records
 
 
 def main() -> None:
@@ -112,6 +153,7 @@ def main() -> None:
         "line-a-01-1s.csv": "LINE-A-01",
         "line-a-02-5s.csv": "LINE-A-02",
         "line-a-03-60s.csv": "LINE-A-03",
+        "line-a-04-60s.csv": "LINE-A-04",
     }
     rows = build_rows()
     for name, device in files.items():
@@ -121,6 +163,10 @@ def main() -> None:
             writer.writerow(["device_id", "ts", "metric", "value"])
             writer.writerows(subset)
         print(f"{name}: {len(subset)} rows")
+    with (here / "service_records.csv").open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerows(build_service_records())
+    print("service_records.csv: written")
 
 
 if __name__ == "__main__":

@@ -110,9 +110,9 @@
         </div>
       </div>
       <div class="kpi {% if cov.grade == 'A' %}ok{% elif cov.grade == 'B' %}warn{% else %}err{% endif %}">
-        <div class="k-label">覆盖率</div>
+        <div class="k-label">覆盖率（按在役时段）</div>
         <div class="k-value">{{ cov.coverage | pct(2) }}</div>
-        <div class="k-note">{{ cov.valid_cells }} / {{ cov.expected_cells }} 有效格</div>
+        <div class="k-note">{{ cov.valid_cells }} / {{ cov.expected_cells }} 在役有效格 · 网格 {{ cov.grid_cells }} 格</div>
       </div>
       <div class="kpi {% if cov.grade == 'A' %}ok{% elif cov.grade == 'B' %}warn{% else %}err{% endif %}">
         <div class="k-label">分级</div>
@@ -120,14 +120,14 @@
         <div class="k-note">≥98% A / ≥95% B / else C</div>
       </div>
       <div class="kpi {% if preview.gaps.count %}warn{% else %}ok{% endif %}">
-        <div class="k-label">缺口</div>
+        <div class="k-label">在役段缺口</div>
         <div class="k-value">{{ preview.gaps.count }}</div>
         <div class="k-note">插补 {{ preview.gaps.interpolated_cells }} 格 · 未修复 {{ preview.gaps.unrepaired_cells }} 格</div>
       </div>
-      <div class="kpi {% if g.held_cells %}warn{% endif %}">
-        <div class="k-label">carried</div>
-        <div class="k-value">{{ g.held_cells }}</div>
-        <div class="k-note">hold 沿用格 · 聚合 {{ g.agg_cells }} / 采样 {{ g.sample_cells }}</div>
+      <div class="kpi {% if g.held_cells or g.excluded_cells %}warn{% endif %}">
+        <div class="k-label">carried / 区间外</div>
+        <div class="k-value" style="font-size:17px">{{ g.held_cells }} / {{ g.excluded_cells }}</div>
+        <div class="k-note">hold 沿用格 · 区间外 {{ g.excluded_points }} 点不参与</div>
       </div>
       <div class="kpi">
         <div class="k-label">流水线耗时</div>
@@ -135,6 +135,26 @@
         <div class="k-note">6 步 · 采样率 {{ preview.interval_s }}s</div>
       </div>
     </div>
+
+    {% if preview.service %}
+    <section class="panel">
+      <div class="panel-head">
+        <h2>设备在役区间（启用版本 <code>{{ preview.service.version_id }}</code>）</h2>
+        <div class="panel-actions">
+          <span class="tag">在役 {{ preview.service.in_service_cells }} 分钟</span>
+          <span class="tag err">区间外 {{ preview.service.excluded_points }} 点（迟到 {{ preview.service.late_points }} / 提前 {{ preview.service.early_points }}）</span>
+        </div>
+      </div>
+      <div class="panel-body tight">
+        {% for iv in preview.service.intervals %}
+        <p class="small" style="margin:2px 0"><span class="tag">{{ iv.start }} → {{ iv.end or '至今' }}</span></p>
+        {% endfor %}
+        <p class="small muted" style="margin:6px 0 0">
+          应到分钟数按实际在役时段计算；投运前/停用后的空白不计缺口，区间外原始点保留并标 late / early，不参与结果。
+        </p>
+      </div>
+    </section>
+    {% endif %}
 
     <section class="panel" id="m2">
       <div class="panel-head">
@@ -187,15 +207,16 @@
         <table class="dense">
           <thead>
             <tr><th style="width:170px">分钟桶</th><th style="width:96px">值（{{ preview.metric_unit }}）</th>
-              <th style="width:110px">来源</th><th style="width:80px">原始点数</th><th style="width:76px">carried</th><th>min / max</th></tr>
+              <th style="width:110px">来源</th><th style="width:80px">原始点数</th><th style="width:76px">carried</th><th style="width:76px">在役</th><th>min / max</th></tr>
           </thead>
           <tbody>
             {% for cell in preview.preview %}
-            <tr>
+            <tr{% if not cell.in_service %} class="muted" style="background:var(--bg,#f7f8fa)"{% endif %}>
               <td class="small muted nowrap">{{ cell.bucket_start }}</td>
               <td class="num">{% if cell.value is not none %}{{ cell.value | fmt(3) }}{% else %}<span class="muted">—</span>{% endif %}</td>
               <td>
-                {% if cell.source == 'agg' %}<span class="tag">聚合 agg</span>
+                {% if not cell.in_service %}<span class="tag err">区间外不参与</span>
+                {% elif cell.source == 'agg' %}<span class="tag">聚合 agg</span>
                 {% elif cell.source == 'sample' %}<span class="tag">原始采样</span>
                 {% elif cell.source == 'hold' %}<span class="tag warn">沿用 hold</span>
                 {% elif cell.source == 'interpolated' %}<span class="tag warn">插补</span>
@@ -203,8 +224,10 @@
               </td>
               <td class="num">{{ cell.samples }}</td>
               <td>{% if cell.carried %}<span class="tag warn">是</span>{% else %}<span class="muted">否</span>{% endif %}</td>
+              <td>{% if cell.in_service %}<span class="tag ok">是</span>{% else %}<span class="tag err">否</span>{% endif %}</td>
               <td class="small muted nowrap">
                 {% if cell.min is not none %}{{ cell.min | fmt(3) }} / {{ cell.max | fmt(3) }}{% else %}—{% endif %}
+                {% if cell.excluded_points %}<span class="tag err">{{ cell.excluded_points | length }} 点不参与</span>{% endif %}
               </td>
             </tr>
             {% endfor %}

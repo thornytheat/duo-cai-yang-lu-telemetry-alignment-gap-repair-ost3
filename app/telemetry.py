@@ -46,6 +46,10 @@ class Dataset:
     series: dict[tuple[str, str], Series]
     window_start: float = 0.0
     window_end: float = 0.0
+    # device_id -> service.ServiceWindow（启用记录合并后的在役区间）；
+    # 为空时由 service.build_service_map 按整段窗口补齐，保持旧口径。
+    service_map: dict | None = None
+    service_version_id: str | None = None
 
     def inventory(self) -> list[dict]:
         devices: dict[str, dict] = {}
@@ -76,6 +80,19 @@ class Dataset:
 
     def series_for(self, device: str, metric: str) -> Series | None:
         return self.series.get((device, metric))
+
+    def service_window_for(self, device: str):
+        """返回设备的在役区间窗口（未启用对齐时为 None，由 pipeline 回退到整段窗口）。"""
+        if not self.service_map:
+            return None
+        return self.service_map.get(device)
+
+    def expected_buckets_for(self, device: str) -> int:
+        """应到分钟桶数：按设备实际在役时段计算；无启用记录时为整窗桶数。"""
+        window = self.service_window_for(device)
+        if window is None:
+            return self.bucket_count()
+        return len(window.in_service_buckets)
 
     def bucket_count(self) -> int:
         return int(self.window_end // settings.BUCKET_SECONDS - self.window_start // settings.BUCKET_SECONDS) + 1
@@ -204,5 +221,7 @@ def _dedupe(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
 def load_sample_dataset() -> Dataset:
     if not settings.SAMPLE_DIR.exists():
         raise ImportError_(f"样例目录不存在：{settings.SAMPLE_DIR}")
-    paths = sorted(settings.SAMPLE_DIR.glob("*.csv"))
+    # 启用记录（service_records.csv）由 service 模块单独加载，不能当遥测解析
+    service_name = settings.SERVICE_RECORDS_PATH.name
+    paths = sorted(p for p in settings.SAMPLE_DIR.glob("*.csv") if p.name != service_name)
     return load_dataset(paths)

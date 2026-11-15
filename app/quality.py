@@ -1,7 +1,9 @@
 """质量报告：覆盖率、分级与跨设备对比。
 
-coverage = 有效格 / 应到格；有效格 = 重采样后有值（原始 / 沿用 / 插补）的格子。
+coverage = 有效格 / 应到格；有效格 = 重采样后有值（原始 / 沿用 / 插补）的在役格子。
+应到格 = 实际在役分钟桶数（投运前 / 停用后的桶不计入分母，也不计缺口）。
 分级：>= 0.98 A，>= 0.95 B，其余 C。
+区间外迟到/提前点保留在网格中但不参与本模块任何计数。
 """
 from __future__ import annotations
 
@@ -22,24 +24,35 @@ def grade_for(coverage: float | None) -> str:
 
 
 def coverage_report(cells: list[dict], expected_cells: int, gaps: dict) -> dict:
-    values = [c for c in cells if c["value"] is not None]
-    raw = [c for c in cells if c["source"] in ("agg", "sample")]
-    carried = [c for c in cells if c.get("carried")]
-    interpolated = [c for c in cells if c["source"] == "interpolated"]
-    missing = [c for c in cells if c["value"] is None]
-    expected = max(1, expected_cells)
-    coverage = len(values) / expected
+    in_service = [c for c in cells if c.get("in_service", True)]
+    excluded_cells = [c for c in cells if not c.get("in_service", True)]
+    values = [c for c in in_service if c["value"] is not None]
+    raw = [c for c in in_service if c["source"] in ("agg", "sample")]
+    carried = [c for c in in_service if c.get("carried")]
+    interpolated = [c for c in in_service if c["source"] == "interpolated"]
+    missing = [c for c in in_service if c["value"] is None]
+    excluded_points = [p for c in excluded_cells for p in c.get("excluded_points", [])]
+    late_points = [p for p in excluded_points if p.get("reason") == "late"]
+    early_points = [p for p in excluded_points if p.get("reason") == "early"]
+    # 应到分钟数：优先调用方按在役时段给出的值；兜底用网格内在役桶数，保证口径只有一个。
+    expected = expected_cells if expected_cells > 0 else len(in_service)
+    expected = max(1, expected)
     return {
         "expected_cells": expected,
+        "in_service_cells": len(in_service),
         "grid_cells": len(cells),
+        "excluded_cells": len(excluded_cells),
+        "excluded_points": len(excluded_points),
+        "late_points": len(late_points),
+        "early_points": len(early_points),
         "raw_cells": len(raw),
         "carried_cells": len(carried),
         "interpolated_cells": len(interpolated),
         "missing_cells": len(missing),
         "valid_cells": len(values),
-        "coverage": coverage,
+        "coverage": len(values) / expected,
         "raw_coverage": len(raw) / expected,
-        "grade": grade_for(coverage),
+        "grade": grade_for(len(values) / expected),
         "gap_count": gaps.get("count", 0),
         "gap_cells": gaps.get("interpolated_cells", 0) + gaps.get("unrepaired_cells", 0),
         "unrepaired_cells": gaps.get("unrepaired_cells", 0),
@@ -98,7 +111,10 @@ CSV_COLUMNS = [
     "device_id",
     "metric",
     "interval_s",
+    "in_service_cells",
     "expected_cells",
+    "excluded_cells",
+    "late_points",
     "raw_cells",
     "carried_cells",
     "interpolated_cells",
@@ -107,6 +123,7 @@ CSV_COLUMNS = [
     "coverage",
     "grade",
     "gap_count",
+    "service_ranges",
     "offset_s",
     "rate_ppm",
     "rmse_s",
@@ -121,12 +138,18 @@ def report_csv(rows: list[dict]) -> str:
     for row in rows:
         drift = row.get("drift") or {}
         cov = row["coverage"]
+        ranges = ";".join(
+            f"{iv['start']}~{iv['end'] or '至今'}" for iv in row.get("service", {}).get("intervals", [])
+        )
         writer.writerow(
             [
                 row["device_id"],
                 row["metric"],
                 row["interval_s"],
+                cov["in_service_cells"],
                 cov["expected_cells"],
+                cov["excluded_cells"],
+                cov["late_points"],
                 cov["raw_cells"],
                 cov["carried_cells"],
                 cov["interpolated_cells"],
@@ -135,6 +158,7 @@ def report_csv(rows: list[dict]) -> str:
                 f"{cov['coverage']:.4f}",
                 cov["grade"],
                 cov["gap_count"],
+                ranges,
                 "" if drift.get("offset_s") is None else f"{drift['offset_s']:.3f}",
                 "" if drift.get("rate_ppm") is None else f"{drift['rate_ppm']:.1f}",
                 "" if drift.get("rmse_s") is None else f"{drift['rmse_s']:.3f}",

@@ -6,10 +6,14 @@
   hold 只在「前后原始格相距 <= 3 格」且「前后采样点间距 > 1.5 桶」时发生；
   更长空缺留给缺口模块判定，1s 设备偶尔丢一格也不会被静默补值。
 - 首格之前没有前值 → 不反向外推（保持空）。
+- 设备在役区间（service.ServiceWindow）之外的桶一律保留但标 in_service=False：
+  不参与聚合/hold/缺口/摘要/覆盖率；落在该桶的原始点作为「区间外点（迟到/提前）」
+  原样保留在 cell.excluded_points 里，不进入任何统计。
 """
 from __future__ import annotations
 
 from . import settings
+from .service import ServiceWindow
 
 
 def bucket_of(ts: float) -> int:
@@ -42,6 +46,10 @@ def _cell(bucket: int, **kwargs) -> dict:
         "filled": False,     # 缺口插补或沿用后是否为「非原始」值
         "first_ts": None,
         "last_ts": None,
+        # 在役对齐：in_service=False 的桶只展示、不参与结果；excluded_points 保留区间外原始点
+        "in_service": True,
+        "exclude_reason": None,
+        "excluded_points": [],
     }
     base.update(kwargs)
     return base
@@ -52,21 +60,50 @@ def resample(
     interval_s: int,
     start_bucket: int,
     end_bucket: int,
+    service_window: ServiceWindow | None = None,
 ) -> list[dict]:
-    """把一条序列重采样到 [start_bucket, end_bucket] 的 1 分钟格。"""
+    """把一条序列重采样到 [start_bucket, end_bucket] 的 1 分钟格。
+
+    service_window 给定时，区间外桶标注 in_service=False 并保留区间外点（不参与计算）。
+    """
     grouped: dict[int, list[tuple[float, float]]] = {}
+    excluded: list[dict] = []
     for ts, value in points:
         b = bucket_of(ts)
         if b < start_bucket or b > end_bucket:
+            continue
+        if service_window is not None and not service_window.is_in_service_bucket(b):
+            excluded.append(
+                {
+                    "ts": ts,
+                    "ts_iso": bucket_start_iso(b),
+                    "bucket": b,
+                    "value": value,
+                    "reason": service_window.classify_point(ts) or "outside",
+                }
+            )
             continue
         grouped.setdefault(b, []).append((ts, value))
 
     high_rate = interval_s < settings.BUCKET_SECONDS
     cells: list[dict] = []
     for bucket in range(start_bucket, end_bucket + 1):
+        in_service = service_window is None or service_window.is_in_service_bucket(bucket)
+        cell_excluded = [p for p in excluded if p["bucket"] == bucket]
+        if not in_service:
+            # 区间外桶：保留行与原始点，标注不参与；绝不聚合/沿用/插值
+            cells.append(
+                _cell(
+                    bucket,
+                    in_service=False,
+                    exclude_reason="not_in_service",
+                    excluded_points=cell_excluded,
+                )
+            )
+            continue
         samples = grouped.get(bucket)
         if not samples:
-            cells.append(_cell(bucket))
+            cells.append(_cell(bucket, excluded_points=cell_excluded))
             continue
         values = [v for _, v in samples]
         if high_rate:
@@ -81,6 +118,7 @@ def resample(
                     min=min(values),
                     samples=len(values),
                     source="agg",
+                    excluded_points=cell_excluded,
                 )
             )
         else:
@@ -94,8 +132,9 @@ def resample(
                     mean=last_value,
                     max=last_value,
                     min=last_value,
-                    samples=len(samples),
+                    samples=len(values),
                     source="sample",
+                    excluded_points=cell_excluded,
                 )
             )
     _apply_hold(cells)
@@ -109,8 +148,13 @@ def _apply_hold(cells: list[dict]) -> None:
     - 前后原始格相距 <= HOLD_MAX_BRACKET_BUCKETS 格（更长的空缺交给缺口模块判定）；
     - 前后两个原始采样点的时间间距 > 1.5 桶（说明该段上报间隔确实稀疏，
       1s 设备偶尔丢一格时不静默补值）。
+    不在役桶不参与：既不作为锚点，也不被沿用，曲线不会延伸到生命周期外。
     """
-    anchor_idx = [i for i, c in enumerate(cells) if c["source"] in ("agg", "sample")]
+    anchor_idx = [
+        i
+        for i, c in enumerate(cells)
+        if c["in_service"] and c["source"] in ("agg", "sample")
+    ]
     if len(anchor_idx) < 2:
         return
     min_spacing_s = 1.5 * settings.BUCKET_SECONDS
@@ -126,6 +170,8 @@ def _apply_hold(cells: list[dict]) -> None:
             continue
         hold_value = cells[prev]["value"]
         for i in range(prev + 1, nxt):
+            if not cells[i]["in_service"]:
+                continue
             cells[i]["value"] = hold_value
             cells[i]["mean"] = hold_value
             cells[i]["max"] = hold_value
@@ -137,11 +183,29 @@ def _apply_hold(cells: list[dict]) -> None:
 
 def stats(cells: list[dict]) -> dict:
     counts = {"agg": 0, "sample": 0, "hold": 0, "empty": 0}
+    in_service_cells = 0
+    excluded_cells = 0
+    excluded_points = 0
+    late_points = 0
+    early_points = 0
     for cell in cells:
+        if not cell["in_service"]:
+            excluded_cells += 1
+            points = cell.get("excluded_points", [])
+            excluded_points += len(points)
+            late_points += sum(1 for p in points if p.get("reason") == "late")
+            early_points += sum(1 for p in points if p.get("reason") == "early")
+            continue
+        in_service_cells += 1
         counts[cell["source"]] = counts.get(cell["source"], 0) + 1
     raw = counts["agg"] + counts["sample"]
     return {
         "cells": len(cells),
+        "in_service_cells": in_service_cells,
+        "excluded_cells": excluded_cells,
+        "excluded_points": excluded_points,
+        "late_points": late_points,
+        "early_points": early_points,
         "agg_cells": counts["agg"],
         "sample_cells": counts["sample"],
         "held_cells": counts["hold"],

@@ -6,7 +6,7 @@
 <a class="btn secondary small" href="/api/report">JSON</a>
 <a class="btn small" href="/api/report.csv">导出 CSV</a>
 {% endblock %}
-{% block status_left %}全部 {{ report.summary.pairs }} 个「设备 × 指标」逐条走完对齐流水线后汇总 · 同一数据集按阈值缓存重算{% endblock %}
+{% block status_left %}全部 {{ report.summary.pairs }} 个「设备 × 指标」逐条走完对齐流水线后汇总 · 同一数据集按阈值缓存重算 · 启用版本 {{ service_version_id }}{% endblock %}
 {% block status_right %}平均覆盖率 {{ report.summary.avg_coverage | pct(2) }} · 缺口 {{ report.summary.total_gaps }} 处 · 漂移 {{ report.summary.drifted_pairs }} 个序列{% endblock %}
 
 {% block content %}
@@ -44,6 +44,45 @@
 
 <div class="split result" style="grid-template-columns:minmax(0,1fr) minmax(288px,320px)">
   <div>
+    <section class="panel" id="m0">
+      <div class="panel-head">
+        <h2>设备在役范围（启用记录合并后）</h2>
+        <div class="panel-actions">
+          <span class="tag">启用版本 <code>{{ service_version_id }}</code></span>
+          <a class="btn secondary small" href="/api/service-records">JSON</a>
+        </div>
+      </div>
+      <div class="table-wrap auto">
+        <table class="dense">
+          <thead>
+            <tr><th style="width:120px">设备</th><th>在役区间</th><th style="width:120px">在役 / 网格（分钟）</th>
+              <th style="width:90px">口径</th></tr>
+          </thead>
+          <tbody>
+            {% for sw in service_windows %}
+            <tr data-device="{{ sw.device_id }}">
+              <td><strong>{{ sw.device_id }}</strong></td>
+              <td class="small nowrap">
+                {% for iv in sw.intervals %}<span class="tag">{{ iv.start }} → {{ iv.end or '至今' }}</span> {% endfor %}
+              </td>
+              <td class="num">{{ sw.in_service_cells }} / {{ sw.grid_cells }}</td>
+              <td>
+                {% if sw.in_service_cells == sw.grid_cells %}<span class="tag ok">整窗在役</span>
+                {% else %}<span class="tag warn">中途投运/停用</span>{% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div class="panel-body tight">
+        <p class="small muted" style="margin:0">
+          应到分钟数按<strong>实际在役时段</strong>计算：投运前 / 停用后的空白不计缺口、不进覆盖率分母；
+          区间外迟到 / 提前原始点保留并标注，不参与结果。重叠启用记录已合并为互斥区间。
+        </p>
+      </div>
+    </section>
+
     <section class="panel" id="m6">
       <div class="panel-head">
         <h2>一、设备级汇总（取该设备最差指标）</h2>
@@ -102,8 +141,8 @@
         <table class="dense" id="pair-table">
           <thead>
             <tr><th style="width:100px">设备</th><th style="width:56px">指标</th><th style="width:52px">采样率</th>
-              <th style="width:54px">应到格</th><th style="width:54px">原始格</th><th style="width:54px">沿用</th>
-              <th style="width:50px">插补</th><th style="width:58px">未修复</th><th style="width:72px">coverage</th>
+              <th style="width:70px">在役/网格</th><th style="width:54px">应到格</th><th style="width:54px">原始格</th><th style="width:54px">沿用</th>
+              <th style="width:50px">插补</th><th style="width:58px">未修复</th><th style="width:58px">区间外点</th><th style="width:72px">coverage</th>
               <th style="width:46px">分级</th><th style="width:46px">缺口</th><th style="width:150px">漂移 offset / ppm / 残差</th></tr>
           </thead>
           <tbody>
@@ -113,11 +152,13 @@
               <td class="nowrap">{{ row.device_id }}</td>
               <td class="small nowrap">{{ row.metric_label }}</td>
               <td class="num">{{ row.interval_s }}s</td>
+              <td class="num small">{{ row.coverage.in_service_cells }} / {{ row.coverage.grid_cells }}</td>
               <td class="num">{{ row.coverage.expected_cells }}</td>
               <td class="num">{{ row.coverage.raw_cells }}</td>
               <td class="num">{% if row.coverage.carried_cells %}<span class="tag warn">{{ row.coverage.carried_cells }}</span>{% else %}0{% endif %}</td>
               <td class="num">{{ row.coverage.interpolated_cells }}</td>
               <td class="num">{% if row.coverage.unrepaired_cells %}<span class="tag err">{{ row.coverage.unrepaired_cells }}</span>{% else %}0{% endif %}</td>
+              <td class="num">{% if row.coverage.excluded_points %}<span class="tag err">{{ row.coverage.excluded_points }}</span>{% else %}0{% endif %}</td>
               <td class="num">{{ row.coverage.coverage | pct(2) }}</td>
               <td><span class="tag {% if row.coverage.grade == 'A' %}ok{% elif row.coverage.grade == 'B' %}warn{% else %}err{% endif %}">{{ row.coverage.grade }}</span></td>
               <td class="num">{{ row.gaps.count }}</td>
@@ -135,8 +176,9 @@
       </div>
       <div class="panel-body tight">
         <p class="small muted" style="margin:0">
-          coverage =（聚合 + 原始采样 + 沿用 + 插补）/ 应到格；未修复格不计入有效格。分级：≥98% A / ≥95% B / else C。
-          基准设备（该指标最高频序列）不与自己比对，偏移、走时与残差记为 —。
+          coverage =（聚合 + 原始采样 + 沿用 + 插补）/ 应到格，<strong>应到格 = 设备实际在役分钟桶数</strong>；
+          投运前 / 停用后桶不计入分母也不计缺口，区间外迟到 / 提前点保留但不参与。未修复格不计入有效格。
+          分级：≥98% A / ≥95% B / else C。基准设备（该指标最高频序列）不与自己比对，偏移、走时与残差记为 —。
         </p>
       </div>
       {% else %}
@@ -192,9 +234,11 @@
         <details class="help" style="margin-top:10px">
           <summary>CSV 列与导出说明</summary>
           <div class="small" style="margin-top:6px">
-            CSV 列：device_id, metric, interval_s, expected_cells, raw_cells, carried_cells, interpolated_cells,
-            unrepaired_cells, valid_cells, coverage, grade, gap_count, offset_s, rate_ppm, rmse_s, drifted。
-            <div style="margin-top:6px">导出的是当前数据集 + 当前阈值的全量结果；按阈值重新计算会得到不同的分级。</div>
+            CSV 列：device_id, metric, interval_s, in_service_cells, expected_cells, excluded_cells, late_points,
+            raw_cells, carried_cells, interpolated_cells, unrepaired_cells, valid_cells, coverage, grade,
+            gap_count, service_ranges, offset_s, rate_ppm, rmse_s, drifted。
+            <div style="margin-top:6px">页面、JSON 与 CSV 共用同一份报告快照，在役范围与覆盖率完全一致；
+              按启用版本 + 阈值重算会得到不同的结果，同批重跑不新增报告。</div>
           </div>
         </details>
       </div>

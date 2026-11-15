@@ -10,8 +10,8 @@
 <a class="btn secondary small" href="/review">质量报告</a>
 <a class="btn small" href="/api/report.csv">导出 CSV</a>
 {% endblock %}
-{% block status_left %}run_id {{ run.run_id }} · 生成于 {{ run.created_at }} · 数据集 {{ run.dataset_id }} · 流水线 {{ run.total_ms | fmt(2) }} ms{% endblock %}
-{% block status_right %}网格 1 分钟 × {{ run.window.cells }} 格 · 采样率 {{ run.interval_s }}s · 阈值 {{ run.threshold_s | fmt(1) }}s{% endblock %}
+{% block status_left %}run_id {{ run.run_id }} · 生成于 {{ run.created_at }} · 数据集 {{ run.dataset_id }}{% if run.service %} · 启用版本 {{ run.service.version_id }}{% endif %} · 流水线 {{ run.total_ms | fmt(2) }} ms{% endblock %}
+{% block status_right %}在役 {{ run.coverage.in_service_cells }} 分钟 / 网格 {{ run.window.grid_cells }} 格 · 采样率 {{ run.interval_s }}s · 阈值 {{ run.threshold_s | fmt(1) }}s{% endblock %}
 
 {% block content %}
 <div class="page-head">
@@ -19,13 +19,23 @@
     <h1 class="page-title">对齐结果 · <span class="mono">{{ run.run_id }}</span></h1>
     <p class="page-sub">
       {{ run.device_id }} · {{ run.metric_label }}<span class="tag">{{ run.metric_unit }}</span> ·
-      网格 <strong>1 分钟 × {{ run.window.cells }} 格</strong>（{{ run.window.start }} → {{ run.window.end }}）·
+      网格 <strong>1 分钟 × {{ run.window.grid_cells or run.window.cells }} 格</strong>（{{ run.window.start }} → {{ run.window.end }}）·
       采样率 {{ run.interval_s }}s ·
       时钟基准：{% if run.reference.self_reference %}<strong>本设备（{{ run.reference.device_id }}，{{ run.reference.interval_s }}s）</strong>{% else %}<strong>{{ run.reference.device_id }}</strong>（{{ run.reference.interval_s }}s）{% endif %} ·
       阈值 {{ run.threshold_s | fmt(1) }}s ·
       结论：{% if run.drift.available %}{{ '时钟漂移，需校时' if run.drift.drifted else '时钟正常' }}{% else %}基准设备，免校时{% endif %}，
       覆盖率 <span class="tag {% if run.coverage.grade == 'A' %}ok{% elif run.coverage.grade == 'B' %}warn{% else %}err{% endif %}">{{ run.coverage.grade }}</span>
+      {% if run.service %} ·
+      <span class="tag warn">在役 {{ run.service.in_service_cells }} 分钟 / 区间外 {{ run.service.excluded_cells }} 格（{{ run.service.excluded_points }} 点不参与）</span>
+      {% endif %}
     </p>
+    {% if run.service %}
+    <p class="small muted" style="margin:6px 0 0">
+      在役区间（启用版本 <code>{{ run.service.version_id }}</code>）：
+      {% for iv in run.service.intervals %}<span class="tag">{{ iv.start }} → {{ iv.end or '至今' }}</span> {% endfor %}
+      应到分钟数按该时段计算；区间外原始点保留在网格中并标 late / early，不参与缺口、摘要与覆盖率。
+    </p>
+    {% endif %}
   </div>
   <div class="page-head-actions">
     <a class="btn secondary small" href="/workbench">换设备再对齐</a>
@@ -47,7 +57,7 @@
   <div class="kpi {% if run.coverage.grade == 'A' %}ok{% elif run.coverage.grade == 'B' %}warn{% else %}err{% endif %}">
     <div class="k-label">覆盖率</div>
     <div class="k-value">{{ run.coverage.coverage | pct(2) }}</div>
-    <div class="k-note">{{ run.coverage.valid_cells }} / {{ run.coverage.expected_cells }} 有效格</div>
+    <div class="k-note">{{ run.coverage.valid_cells }} / {{ run.coverage.expected_cells }} 在役有效格</div>
   </div>
   <div class="kpi {% if run.coverage.grade == 'A' %}ok{% elif run.coverage.grade == 'B' %}warn{% else %}err{% endif %}">
     <div class="k-label">分级</div>
@@ -94,6 +104,7 @@
           <span class="tag">聚合 {{ run.grid.agg_cells }} · 采样 {{ run.grid.sample_cells }}</span>
           <span class="tag warn">沿用 {{ run.grid.held_cells }}</span>
           <span class="tag">空缺 {{ run.grid.empty_cells }}（含未修复）</span>
+          {% if run.grid.excluded_cells %}<span class="tag err">区间外 {{ run.grid.excluded_cells }} 格 / {{ run.grid.excluded_points }} 点</span>{% endif %}
         </div>
       </div>
       <div class="table-wrap roomy">
@@ -101,15 +112,16 @@
           <thead>
             <tr><th style="width:170px">分钟桶</th><th style="width:110px">值（{{ run.metric_unit }}）</th>
               <th style="width:110px">来源</th><th style="width:80px">原始点数</th>
-              <th style="width:76px">carried</th><th>min / max</th></tr>
+              <th style="width:76px">carried</th><th style="width:80px">在役</th><th>min / max</th></tr>
           </thead>
           <tbody>
             {% for cell in run.preview %}
-            <tr>
+            <tr{% if not cell.in_service %} class="muted" style="background:var(--bg,#f7f8fa)"{% endif %}>
               <td class="small muted nowrap">{{ cell.bucket_start }}</td>
               <td class="num">{% if cell.value is not none %}{{ cell.value | fmt(3) }}{% else %}<span class="muted">—</span>{% endif %}</td>
               <td>
-                {% if cell.source == 'agg' %}<span class="tag">聚合 agg</span>
+                {% if not cell.in_service %}<span class="tag err">区间外不参与</span>
+                {% elif cell.source == 'agg' %}<span class="tag">聚合 agg</span>
                 {% elif cell.source == 'sample' %}<span class="tag">原始采样</span>
                 {% elif cell.source == 'hold' %}<span class="tag warn">沿用 hold</span>
                 {% elif cell.source == 'interpolated' %}<span class="tag warn">插补</span>
@@ -117,8 +129,10 @@
               </td>
               <td class="num">{{ cell.samples }}</td>
               <td>{% if cell.carried %}<span class="tag warn">是</span>{% else %}<span class="muted">否</span>{% endif %}</td>
+              <td>{% if cell.in_service %}<span class="tag ok">是</span>{% else %}<span class="tag err">否</span>{% endif %}</td>
               <td class="small muted nowrap">
                 {% if cell.min is not none %}{{ cell.min | fmt(3) }} / {{ cell.max | fmt(3) }}{% else %}—{% endif %}
+                {% if cell.excluded_points %}<span class="tag err">含 {{ cell.excluded_points | length }} 个{{ '迟到' if cell.excluded_points[0].reason == 'late' else '提前' }}点</span>{% endif %}
               </td>
             </tr>
             {% endfor %}
@@ -129,7 +143,16 @@
         <p class="small muted" style="margin:0">
           聚合 {{ run.grid.agg_cells }} 格 · 原始采样 {{ run.grid.sample_cells }} 格 · 沿用 carried {{ run.grid.held_cells }} 格 ·
           空缺 {{ run.grid.empty_cells }} 格（含未修复）。表格在容器内滚动，页面只滚主区。
+          {% if run.grid.excluded_cells %}区间外 {{ run.grid.excluded_cells }} 格（投运前/停用后）保留展示但不参与任何计算。{% endif %}
         </p>
+        {% if run.excluded_preview %}
+        <p class="small" style="margin:6px 0 0">
+          <strong>区间外原始点（保留不参与，最多展示 50 个）：</strong>
+          {% for p in run.excluded_preview %}
+          <span class="tag {% if p.reason == 'late' %}err{% else %}warn{% endif %}">{{ p.ts_iso }} · {{ p.value | fmt(3) }} · {{ '停用后迟到' if p.reason == 'late' else '投运前提前' }}</span>
+          {% endfor %}
+        </p>
+        {% endif %}
       </div>
     </div>
 
@@ -258,12 +281,16 @@
           <div class="table-wrap auto">
             <table class="dense">
               <tbody>
-                <tr><th style="width:200px">应到格</th><td>{{ run.coverage.expected_cells }}</td></tr>
+                <tr><th style="width:200px">网格总桶数</th><td>{{ run.coverage.grid_cells }}（含投运前 / 停用后桶）</td></tr>
+                <tr><th>在役桶数（实际在役时段）</th><td>{{ run.coverage.in_service_cells }}</td></tr>
+                <tr><th>应到格（= 在役分钟数）</th><td><strong>{{ run.coverage.expected_cells }}</strong></td></tr>
                 <tr><th>有效格（原始+沿用+插补）</th><td>{{ run.coverage.valid_cells }}</td></tr>
                 <tr><th>原始格（聚合+采样）</th><td>{{ run.coverage.raw_cells }}（raw 覆盖率 {{ run.coverage.raw_coverage | pct(2) }}）</td></tr>
                 <tr><th>沿用 carried</th><td>{{ run.coverage.carried_cells }}</td></tr>
                 <tr><th>插补</th><td>{{ run.coverage.interpolated_cells }}</td></tr>
-                <tr><th>缺失（未修复）</th><td>{{ run.coverage.missing_cells }}</td></tr>
+                <tr><th>缺失（在役段未修复）</th><td>{{ run.coverage.missing_cells }}</td></tr>
+                <tr><th>区间外桶 / 原始点</th><td>{{ run.coverage.excluded_cells }} 格 / {{ run.coverage.excluded_points }} 点
+                  （迟到 {{ run.coverage.late_points }} · 提前 {{ run.coverage.early_points }}，保留但不参与）</td></tr>
                 <tr><th>coverage = 有效/应到</th><td><strong>{{ run.coverage.coverage | pct(2) }}</strong></td></tr>
                 <tr><th>分级（≥98% A / ≥95% B / else C）</th>
                   <td><span class="tag {% if run.coverage.grade == 'A' %}ok{% elif run.coverage.grade == 'B' %}warn{% else %}err{% endif %}">{{ run.coverage.grade }}</span></td></tr>

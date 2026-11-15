@@ -33,9 +33,10 @@ def test_import_is_idempotent(client: TestClient):
     assert first["dataset_id"] == second["dataset_id"]
     assert first["sha256"] == second["sha256"]
     assert first["rows"] > 20000
-    assert len(first["devices"]) == 3
-    assert {d["device_id"] for d in first["devices"]} == {"LINE-A-01", "LINE-A-02", "LINE-A-03"}
+    assert len(first["devices"]) == 4
+    assert {d["device_id"] for d in first["devices"]} == {"LINE-A-01", "LINE-A-02", "LINE-A-03", "LINE-A-04"}
     assert first["window"]["cells"] == 360
+    assert first["service_version_id"].startswith("svc-")
 
 
 def test_drifted_device_offset_is_about_37_seconds(client: TestClient):
@@ -133,18 +134,18 @@ def test_pages_render(client: TestClient):
 
 def test_report_and_csv_export(client: TestClient):
     report = client.get("/api/report").json()
-    assert len(report["rows"]) == 5
+    assert len(report["rows"]) == 6
     grades = {row["coverage"]["grade"] for row in report["rows"]}
     assert grades == {"A", "B", "C"}
-    assert len(report["devices"]) == 3
+    assert len(report["devices"]) == 4
     assert report["summary"]["total_gaps"] >= 5
 
     csv_resp = client.get("/api/report.csv")
     assert csv_resp.status_code == 200
     assert csv_resp.headers["content-type"].startswith("text/csv")
     lines = [line for line in csv_resp.text.strip().splitlines() if line]
-    assert lines[0].startswith("device_id,metric,interval_s")
-    assert len(lines) == 6  # 表头 + 5 条序列
+    assert lines[0].startswith("device_id,metric,interval_s,in_service_cells,expected_cells")
+    assert len(lines) == 7  # 表头 + 6 条序列
 
 
 def test_alignment_pipeline_stages_recorded(client: TestClient):

@@ -29,9 +29,15 @@ def percentile(values: list[float], p: float) -> float | None:
 
 
 def hourly_summary(cells: list[dict], cells_per_hour: int = 60) -> list[dict]:
-    """按小时聚合网格（只统计有值的格；空/未修复格计入缺口数）。"""
+    """按小时聚合网格（只统计在役且有值的格；在役空/未修复格计入缺口数）。
+
+    不在役桶（投运前/停用后）整体跳过：既不产生数值，也不计缺口。
+    没有任何在役桶的自然小时不输出。
+    """
     buckets: dict[int, list[dict]] = {}
     for cell in cells:
+        if not cell.get("in_service", True):
+            continue
         hour = cell["bucket"] // cells_per_hour
         buckets.setdefault(hour, []).append(cell)
 
@@ -47,6 +53,7 @@ def hourly_summary(cells: list[dict], cells_per_hour: int = 60) -> list[dict]:
                 "hour_index": hour,
                 "hour_start": _iso(hour * cells_per_hour * settings.BUCKET_SECONDS),
                 "cells": len(group),
+                "in_service_cells": len(group),
                 "value_cells": len(values),
                 "min": min(values) if values else None,
                 "max": max(values) if values else None,

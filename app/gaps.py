@@ -3,15 +3,25 @@
 判定：网格内没有原始点（source='empty'），且前后都有原始点 → gap。
 修复：gap 长度 <= 3 格 → 线性插补（interpolated）；> 3 格 → unrepaired。
 边界：序列首尾不外推——开头/结尾的空缺只登记为 unrepaired(boundary)，绝不填值。
+在役：不在役桶（in_service=False，投运前/停用后）不参与缺口判定与修复，
+     也不会被当作序列首尾空缺——生命周期外的空白不是缺口。
 """
 from __future__ import annotations
 
 from . import settings
 
 
+def _in_service(cell: dict) -> bool:
+    return cell.get("in_service", True)
+
+
 def find_gaps(cells: list[dict]) -> dict:
     """在（已 hold 的）网格上找出缺口并给出修复结论。"""
-    raw_idx = [i for i, c in enumerate(cells) if c["source"] in ("agg", "sample")]
+    raw_idx = [
+        i
+        for i, c in enumerate(cells)
+        if _in_service(c) and c["source"] in ("agg", "sample")
+    ]
     gaps: list[dict] = []
 
     if not raw_idx:
@@ -23,23 +33,25 @@ def find_gaps(cells: list[dict]) -> dict:
             "boundary_cells": 0,
         }
 
-    # 首部空缺：不外推
+    # 首部空缺（仅限在役段）：不外推
     first = raw_idx[0]
-    if first > 0:
+    head = [i for i in range(0, first) if _in_service(cells[i])]
+    if head:
         gaps.append(
             _gap_item(
                 cells,
-                start_idx=0,
-                end_idx=first - 1,
+                start_idx=head[0],
+                end_idx=head[-1],
                 kind="unrepaired",
-                reason="序列开头空缺，首端不外推",
+                reason="在役段开头空缺，首端不外推",
                 prev_idx=None,
                 next_idx=first,
             )
         )
 
     for prev, nxt in zip(raw_idx, raw_idx[1:]):
-        run_len = nxt - prev - 1
+        run_idx = [i for i in range(prev + 1, nxt) if _in_service(cells[i])]
+        run_len = len(run_idx)
         if run_len == 0:
             continue
         bracket = cells[nxt]["bucket"] - cells[prev]["bucket"]
@@ -53,8 +65,8 @@ def find_gaps(cells: list[dict]) -> dict:
         gaps.append(
             _gap_item(
                 cells,
-                start_idx=prev + 1,
-                end_idx=nxt - 1,
+                start_idx=run_idx[0],
+                end_idx=run_idx[-1],
                 kind=kind,
                 reason=reason,
                 prev_idx=prev,
@@ -62,16 +74,17 @@ def find_gaps(cells: list[dict]) -> dict:
             )
         )
 
-    # 尾部空缺：不外推
+    # 尾部空缺（仅限在役段）：不外推
     last = raw_idx[-1]
-    if last < len(cells) - 1:
+    tail = [i for i in range(last + 1, len(cells)) if _in_service(cells[i])]
+    if tail:
         gaps.append(
             _gap_item(
                 cells,
-                start_idx=last + 1,
-                end_idx=len(cells) - 1,
+                start_idx=tail[0],
+                end_idx=tail[-1],
                 kind="unrepaired",
-                reason="序列结尾空缺，尾端不外推",
+                reason="在役段结尾空缺，尾端不外推",
                 prev_idx=last,
                 next_idx=None,
             )

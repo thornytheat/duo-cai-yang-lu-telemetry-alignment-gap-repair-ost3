@@ -34,6 +34,9 @@ DRIFT_MIN_ANCHORS = 4             # 少于该锚点数不出结论
 _BASE = pathlib.Path(__file__).resolve().parent.parent
 DATA_DIR = pathlib.Path(os.environ.get("TSGRID_DATA_DIR", str(_BASE / "data")))
 SAMPLE_DIR = pathlib.Path(os.environ.get("TSGRID_SAMPLE_DIR", str(_BASE / "sample_data" / "telemetry")))
+SERVICE_RECORDS_PATH = pathlib.Path(
+    os.environ.get("TSGRID_SERVICE_RECORDS", str(SAMPLE_DIR / "service_records.csv"))
+)
 DB_PATH = pathlib.Path(os.environ.get("TSGRID_DB_PATH", str(DATA_DIR / "tsgrid.sqlite3")))
 
-SEED_VERSION = "tsgrid-seed-v1"
+SEED_VERSION = "tsgrid-seed-v2"
